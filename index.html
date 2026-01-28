@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Scan ISBN → Lexile</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Arial, sans-serif; padding: 16px; line-height: 1.35; max-width: 720px; margin: 0 auto; }
+    video { width: 100%; max-width: 520px; border-radius: 12px; background: #000; }
+    button, input { font-size: 16px; padding: 12px 14px; border-radius: 10px; width: 100%; }
+    button { border: 0; margin: 8px 0; cursor: pointer; }
+    input { border: 1px solid #ccc; margin: 8px 0; }
+    .small { font-size: 14px; opacity: 0.85; }
+    .row { display: grid; grid-template-columns: 1fr; gap: 10px; }
+    @media (min-width: 600px) { .row { grid-template-columns: 1fr 1fr; } }
+  </style>
+</head>
+<body>
+  <h2>Scan ISBN → Lexile</h2>
+  <p>Tap <b>Start scanning</b>, scan the ISBN barcode, and Lexile Hub will open.</p>
+
+  <div class="row">
+    <button id="start">Start scanning</button>
+    <button id="stop" disabled>Stop</button>
+  </div>
+
+  <p id="status" class="small">Ready.</p>
+  <video id="video" muted playsinline></video>
+
+  <h3>Can’t scan?</h3>
+  <p class="small">Type the ISBN (numbers only) and open Lexile Hub.</p>
+  <input id="isbnInput" inputmode="numeric" placeholder="Enter ISBN-13 (e.g., 9781234567890)" />
+  <button id="open">Open Lexile Hub</button>
+
+  <p class="small">
+    Tip: The printed book barcode is usually ISBN/EAN-13 and often starts with 978 or 979.
+  </p>
+
+  <script type="module">
+    import { BrowserMultiFormatReader } from "https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/+esm";
+
+    const statusEl = document.getElementById("status");
+    const videoEl = document.getElementById("video");
+    const startBtn = document.getElementById("start");
+    const stopBtn = document.getElementById("stop");
+    const isbnInput = document.getElementById("isbnInput");
+    const openBtn = document.getElementById("open");
+
+    const reader = new BrowserMultiFormatReader();
+
+    const digitsOnly = (t) => (t || "").replace(/\D/g, "");
+    const looksLikeIsbn = (s) => s.length === 13 && (s.startsWith("978") || s.startsWith("979"));
+
+    function openLexile(isbn13) {
+      window.location.href = `https://hub.lexile.com/find-a-book/details/${isbn13}`;
+    }
+
+    function supported() {
+      return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+    }
+
+    async function start() {
+      if (!supported()) {
+        statusEl.textContent = "This browser can’t access the camera. Use the ISBN box below instead.";
+        return;
+      }
+
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      statusEl.textContent = "Requesting camera permission…";
+
+      try {
+        // Try back camera on phones/tablets; on laptops this just picks the default webcam.
+        const constraints = { video: { facingMode: "environment" }, audio: false };
+
+        await reader.decodeFromConstraints(constraints, videoEl, (result, err) => {
+          if (!result) return;
+
+          const raw = result.getText();
+          const isbn = digitsOnly(raw);
+
+          if (looksLikeIsbn(isbn)) {
+            statusEl.textContent = `Found ISBN: ${isbn}. Opening Lexile Hub…`;
+            stop();
+            openLexile(isbn);
+          } else {
+            statusEl.textContent = `Scanned: ${raw} (not an ISBN-13). Try the ISBN barcode on the back cover.`;
+          }
+        });
+
+        statusEl.textContent = "Point the camera at the ISBN barcode…";
+
+      } catch (e) {
+        console.error(e);
+        statusEl.textContent =
+          "Camera didn’t start. Check that you allowed camera access and that the device/browser isn’t blocking it.";
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+      }
+    }
+
+    function stop() {
+      reader.reset();
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      statusEl.textContent = "Stopped.";
+    }
+
+    startBtn.addEventListener("click", start);
+    stopBtn.addEventListener("click", stop);
+
+    openBtn.addEventListener("click", () => {
+      const isbn = digitsOnly(isbnInput.value);
+      if (looksLikeIsbn(isbn)) openLexile(isbn);
+      else statusEl.textContent = "Please enter a valid ISBN-13 (13 digits, usually starts 978 or 979).";
+    });
+  </script>
+</body>
+</html>
