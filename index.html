@@ -51,90 +51,125 @@
     const isbnInput = document.getElementById("isbnInput");
     const openBtn = document.getElementById("open");
 
-    // Only look for the barcode type we care about (EAN_13)
+    // Android/Chrome stability: avoid requesting a specific camera unless needed.
+    // Decode only EAN-13 for speed and reliability.
     const hints = new Map();
     hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.EAN_13]);
 
     const reader = new BrowserMultiFormatReader(hints);
 
-    let controls = null; // will hold the stop() handle
+    let controls = null;
+    let starting = false;
 
     const digitsOnly = (t) => (t || "").replace(/\D/g, "");
     const looksLikeIsbn = (s) => s.length === 13 && (s.startsWith("978") || s.startsWith("979"));
 
+    const isAndroid = /Android/i.test(navigator.userAgent);
+
     function openLexile(isbn13) {
-      window.location.href = `https://hub.lexile.com/find-a-book/details/${isbn13}`;
+      // Use location.assign for slightly more consistent navigation on some Android builds
+      window.location.assign(`https://hub.lexile.com/find-a-book/details/${isbn13}`);
     }
 
     async function pickBackCameraDeviceId() {
       const devices = await BrowserMultiFormatReader.listVideoInputDevices();
       if (!devices || devices.length === 0) return null;
 
-      // Try to pick a "back/environment" camera if device labels are available
-      const preferred = devices.find(d =>
-        /back|rear|environment/i.test(d.label)
-      );
+      const preferred = devices.find(d => /back|rear|environment/i.test(d.label));
       return (preferred || devices[0]).deviceId;
     }
 
+    function stop() {
+      try { controls?.stop(); } catch {}
+      controls = null;
+      starting = false;
+
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+
+      // Don't overwrite redirect message
+      if (!statusEl.textContent.includes("Opening Lexile Hub")) {
+        statusEl.textContent = "Stopped.";
+      }
+    }
+
     async function start() {
+      if (starting) return; // prevent double-tap issues
+      starting = true;
+
       if (!navigator.mediaDevices?.getUserMedia) {
         statusEl.textContent = "This browser can’t access the camera. Use the ISBN box below.";
+        starting = false;
         return;
       }
 
       startBtn.disabled = true;
       stopBtn.disabled = false;
-      statusEl.textContent = "Starting camera… (If prompted, tap Allow)";
+      statusEl.textContent = "Requesting camera permission… (If prompted, tap Allow)";
 
       try {
-        // Make sure any previous stream is stopped
+        // Always stop any prior stream before starting a new one
         stop();
 
-        const deviceId = await pickBackCameraDeviceId();
+        // Android stability: prefer letting the browser pick the camera (deviceId = null).
+        // On non-Android devices, we try to pick the back camera (but fall back safely).
+        let deviceId = null;
+        if (!isAndroid) {
+          try { deviceId = await pickBackCameraDeviceId(); } catch { deviceId = null; }
+        }
 
         statusEl.textContent = "Point the camera at the ISBN barcode…";
 
-        // This returns a controls object we can stop reliably
         controls = await reader.decodeFromVideoDevice(
           deviceId,
           videoEl,
-          (result, err, ctrl) => {
-            if (result) {
-              const raw = result.getText();
-              const isbn = digitsOnly(raw);
+          (result, err) => {
+            if (!result) return;
 
-              if (looksLikeIsbn(isbn)) {
-                statusEl.textContent = `Found ISBN: ${isbn}. Opening Lexile Hub…`;
-                stop();
-                openLexile(isbn);
-              } else {
-                statusEl.textContent = `Scanned: ${raw} (not an ISBN-13). Try the ISBN barcode on the back cover.`;
+            const raw = result.getText();
+            const isbn = digitsOnly(raw);
+
+            if (looksLikeIsbn(isbn)) {
+              statusEl.textContent = `Found ISBN: ${isbn}. Opening Lexile Hub…`;
+
+              // Stop camera cleanly before navigating
+              try { controls?.stop(); } catch {}
+              controls = null;
+
+              // Android extra-stable behavior: navigate, then force a reload when the user comes back
+              // (prevents "camera started but scanning failed" on subsequent scans).
+              if (isAndroid) {
+                // Store a flag so that when user returns, we reinitialize cleanly.
+                sessionStorage.setItem("reloadOnReturn", "1");
               }
+
+              openLexile(isbn);
+            } else {
+              statusEl.textContent = `Scanned: ${raw} (not an ISBN-13). Try the ISBN barcode on the back cover.`;
             }
           }
         );
+
+        starting = false;
+
       } catch (e) {
         console.error(e);
-        statusEl.textContent =
-          "Camera started but scanning failed. Try Safari/Chrome, and confirm camera access isn’t blocked by school restrictions.";
+        statusEl.textContent = `Camera/scanner error: ${e?.name || "Unknown"} — ${e?.message || e}`;
         startBtn.disabled = false;
         stopBtn.disabled = true;
+        starting = false;
       }
     }
 
-    function stop() {
-      // Stop decoding + stop camera stream
-      try { controls?.stop(); } catch {}
-      controls = null;
-
-      try { reader.reset(); } catch {}
-
-      startBtn.disabled = false;
-      stopBtn.disabled = true;
-      // Don't overwrite a meaningful message if we are redirecting
-      if (!statusEl.textContent.includes("Opening Lexile Hub")) statusEl.textContent = "Stopped.";
-    }
+    // Android/Chrome stability: when user returns from Lexile (Back button),
+    // the browser may keep the old camera state. Force a clean reload once.
+    window.addEventListener("pageshow", () => {
+      if (sessionStorage.getItem("reloadOnReturn") === "1") {
+        sessionStorage.removeItem("reloadOnReturn");
+        // Small delay helps some Android devices
+        setTimeout(() => window.location.reload(), 150);
+      }
+    });
 
     startBtn.addEventListener("click", start);
     stopBtn.addEventListener("click", stop);
