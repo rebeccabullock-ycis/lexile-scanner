@@ -31,31 +31,41 @@
       object-fit: cover;
     }
 
-    /* “Aim here” guide box */
     .aim {
       position: absolute;
       left: 8%;
       right: 8%;
-      top: 40%;
-      height: 22%;
+      top: 42%;
+      height: 18%;
       border: 3px solid rgba(255,255,255,0.85);
       border-radius: 12px;
       box-shadow: 0 0 0 9999px rgba(0,0,0,0.20);
       pointer-events: none;
     }
+
+    .liveDot {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: #999;
+      margin-right: 8px;
+      vertical-align: middle;
+    }
+    .liveDot.on { background: #1db954; } /* green */
   </style>
 </head>
 
 <body>
   <h2>Scan ISBN → Lexile</h2>
-  <p>Tap <b>Start</b>, scan the <b>ISBN barcode (EAN-13)</b> on the back of the book (often starts with 978 or 979), and Lexile Hub will open.</p>
+  <p>Tap <b>Start</b>, then scan the <b>ISBN barcode</b> on the back of the book (13 digits, often starts with 978 or 979).</p>
 
   <div class="row">
     <button id="start">Start scanning</button>
     <button id="stop" disabled>Stop</button>
   </div>
 
-  <p id="status" class="small">Ready.</p>
+  <p id="status" class="small"><span id="dot" class="liveDot"></span>Ready.</p>
 
   <div id="scanner">
     <div class="aim"></div>
@@ -66,9 +76,14 @@
   <input id="isbnInput" inputmode="numeric" placeholder="9781234567890" />
   <button id="open">Open Lexile Hub</button>
 
+  <p class="small">
+    If your barcode is a <b>library sticker</b> (not the printed ISBN), this page won’t detect it as an ISBN.
+  </p>
+
   <script src="https://cdn.jsdelivr.net/npm/quagga@0.12.1/dist/quagga.min.js"></script>
   <script>
     const statusEl = document.getElementById("status");
+    const dotEl = document.getElementById("dot");
     const startBtn = document.getElementById("start");
     const stopBtn = document.getElementById("stop");
     const scannerEl = document.getElementById("scanner");
@@ -76,6 +91,7 @@
     const openBtn = document.getElementById("open");
 
     let running = false;
+    let lastProcessedAt = 0;
 
     const digitsOnly = (t) => (t || "").replace(/\D/g, "");
     const looksLikeIsbn = (s) => s.length === 13 && (s.startsWith("978") || s.startsWith("979"));
@@ -84,30 +100,64 @@
       window.location.assign(`https://hub.lexile.com/find-a-book/details/${isbn13}`);
     }
 
+    function forceStopCameraTracks() {
+      // This is the key Android "Stop actually stops" fix.
+      const v = scannerEl.querySelector("video");
+      const stream = v && v.srcObject;
+      if (stream && stream.getTracks) {
+        stream.getTracks().forEach(t => {
+          try { t.stop(); } catch {}
+        });
+      }
+      if (v) {
+        try { v.pause(); } catch {}
+        try { v.srcObject = null; } catch {}
+      }
+    }
+
+    function cleanupScannerDom() {
+      // Remove leftover video/canvas Quagga sometimes leaves behind
+      scannerEl.querySelectorAll("canvas").forEach(c => c.remove());
+      scannerEl.querySelectorAll("video").forEach(v => v.remove());
+    }
+
     function stop() {
-      if (!running) return;
+      if (!running) {
+        // Even if Quagga thinks it's not running, still try to stop camera tracks.
+        forceStopCameraTracks();
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        dotEl.classList.remove("on");
+        statusEl.lastChild && (statusEl.lastChild.nodeValue = "Stopped.");
+        return;
+      }
+
+      try { Quagga.offDetected(); } catch {}
+      try { Quagga.offProcessed(); } catch {}
+
       try { Quagga.stop(); } catch {}
+      forceStopCameraTracks();
+      cleanupScannerDom();
+
       running = false;
       startBtn.disabled = false;
       stopBtn.disabled = true;
-      statusEl.textContent = "Stopped.";
+      dotEl.classList.remove("on");
+      statusEl.innerHTML = '<span id="dot" class="liveDot"></span>Stopped.';
+      // re-bind dot element because we replaced innerHTML
+      document.getElementById("dot").classList.remove("on");
     }
 
     async function start() {
       if (running) return;
 
-      // Clear any previous Quagga DOM
-      // (Quagga sometimes leaves a canvas behind)
-      const canvases = scannerEl.querySelectorAll("canvas");
-      canvases.forEach(c => c.remove());
-      const videos = scannerEl.querySelectorAll("video");
-      videos.forEach(v => v.remove());
+      cleanupScannerDom();
 
       startBtn.disabled = true;
       stopBtn.disabled = false;
-      statusEl.textContent = "Starting camera… (If prompted, tap Allow)";
+      statusEl.innerHTML = '<span id="dot" class="liveDot"></span>Starting camera… (tap Allow if prompted)';
+      document.getElementById("dot").classList.remove("on");
 
-      // Quagga config tuned for ISBN/EAN-13 on Android
       Quagga.init({
         inputStream: {
           name: "Live",
@@ -118,18 +168,15 @@
             width: { ideal: 1280 },
             height: { ideal: 720 }
           },
-          area: { // restrict scanning to the “aim” box region (percentages)
-            top: "40%",
+          area: {
+            top: "42%",
             right: "8%",
             left: "8%",
-            bottom: "38%"
+            bottom: "40%"
           }
         },
-        locator: {
-          patchSize: "medium",
-          halfSample: true
-        },
-        numOfWorkers: Math.max(1, (navigator.hardwareConcurrency || 2) - 1),
+        locator: { patchSize: "medium", halfSample: true },
+        numOfWorkers: 0, // Android stability: 0 uses main thread; avoids some Chrome worker quirks
         frequency: 10,
         decoder: {
           readers: ["ean_reader"] // EAN-13
@@ -138,30 +185,46 @@
       }, function(err) {
         if (err) {
           console.error(err);
-          statusEl.textContent = "Camera/scanner failed to start. Check that camera permission is allowed for this site in Chrome.";
           startBtn.disabled = false;
           stopBtn.disabled = true;
           running = false;
+          statusEl.innerHTML = '<span class="liveDot"></span>Could not start scanner. Check Chrome site permissions → Camera = Allow.';
           return;
         }
+
         Quagga.start();
         running = true;
-        statusEl.textContent = "Point the barcode inside the white box and hold still…";
-      });
 
-      Quagga.offDetected(); // prevent duplicate handlers if Start pressed again
-      Quagga.onDetected(function(result) {
-        const code = result && result.codeResult && result.codeResult.code;
-        const isbn = digitsOnly(code);
+        // Visual “we are processing frames” indicator
+        Quagga.onProcessed(() => {
+          lastProcessedAt = Date.now();
+          const dot = document.getElementById("dot");
+          if (dot) dot.classList.add("on");
+        });
 
-        if (looksLikeIsbn(isbn)) {
-          statusEl.textContent = `Found ISBN: ${isbn}. Opening Lexile Hub…`;
-          stop();
-          // Small delay helps Android finish releasing camera before navigation
-          setTimeout(() => openLexile(isbn), 150);
-        } else if (isbn && isbn.length >= 10) {
-          statusEl.textContent = `Scanned: ${isbn} (not an ISBN-13 starting 978/979). Try the printed ISBN barcode on the book.`;
-        }
+        // If no frames processed after 2 seconds, tell the user
+        setTimeout(() => {
+          if (!running) return;
+          if (Date.now() - lastProcessedAt > 1800) {
+            statusEl.innerHTML = '<span id="dot" class="liveDot on"></span>Camera is on, but scanning is not seeing frames clearly. Try brighter light, reduce glare, and hold the barcode still inside the white box.';
+          } else {
+            statusEl.innerHTML = '<span id="dot" class="liveDot on"></span>Hold the ISBN barcode inside the white box and keep it still…';
+          }
+        }, 2000);
+
+        Quagga.offDetected();
+        Quagga.onDetected(function(result) {
+          const code = result?.codeResult?.code || "";
+          const isbn = digitsOnly(code);
+
+          if (looksLikeIsbn(isbn)) {
+            statusEl.innerHTML = `<span id="dot" class="liveDot on"></span>Found ISBN: ${isbn}. Opening Lexile Hub…`;
+            stop();
+            setTimeout(() => openLexile(isbn), 200);
+          } else if (isbn) {
+            statusEl.innerHTML = `<span id="dot" class="liveDot on"></span>Read: ${isbn}. This doesn't look like an ISBN-13 starting 978/979. Try the printed ISBN barcode on the book.`;
+          }
+        });
       });
     }
 
@@ -171,10 +234,10 @@
     openBtn.addEventListener("click", () => {
       const isbn = digitsOnly(isbnInput.value);
       if (looksLikeIsbn(isbn)) openLexile(isbn);
-      else statusEl.textContent = "Please enter a valid ISBN-13 (13 digits, usually starts 978 or 979).";
+      else statusEl.innerHTML = '<span class="liveDot"></span>Please enter a valid ISBN-13 (13 digits, usually starts 978 or 979).';
     });
 
-    // If user navigates away and comes back, stop cleanly
+    // Clean up if user navigates away
     window.addEventListener("pagehide", stop);
   </script>
 </body>
