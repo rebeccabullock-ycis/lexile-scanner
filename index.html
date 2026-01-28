@@ -217,7 +217,7 @@
           const code = result?.codeResult?.code || "";
           const isbn = digitsOnly(code);
 
-          if (looksLikeIsbn(isbn)) {
+          if (looksLikebarcode(isbn)) {
             statusEl.innerHTML = `<span id="dot" class="liveDot on"></span>Found ISBN: ${isbn}. Opening Lexile Hub…`;
             stop();
             setTimeout(() => openLexile(isbn), 200);
