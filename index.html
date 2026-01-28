@@ -5,20 +5,50 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Scan ISBN → Lexile</title>
   <style>
-    body { font-family: system-ui, -apple-system, Arial, sans-serif; padding: 16px; line-height: 1.35; max-width: 720px; margin: 0 auto; }
-    video { width: 100%; max-width: 560px; border-radius: 12px; background: #000; }
+    body { font-family: system-ui, -apple-system, Arial, sans-serif; padding: 16px; line-height: 1.35; max-width: 760px; margin: 0 auto; }
     button, input { font-size: 16px; padding: 12px 14px; border-radius: 10px; width: 100%; }
     button { border: 0; margin: 8px 0; cursor: pointer; }
     input { border: 1px solid #ccc; margin: 8px 0; }
     .small { font-size: 14px; opacity: 0.85; }
     .row { display: grid; grid-template-columns: 1fr; gap: 10px; }
     @media (min-width: 640px) { .row { grid-template-columns: 1fr 1fr; } }
+
+    #scanner {
+      position: relative;
+      width: 100%;
+      max-width: 560px;
+      aspect-ratio: 3 / 4;
+      background: #000;
+      border-radius: 12px;
+      overflow: hidden;
+      margin: 10px 0;
+    }
+    #scanner video, #scanner canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    /* “Aim here” guide box */
+    .aim {
+      position: absolute;
+      left: 8%;
+      right: 8%;
+      top: 40%;
+      height: 22%;
+      border: 3px solid rgba(255,255,255,0.85);
+      border-radius: 12px;
+      box-shadow: 0 0 0 9999px rgba(0,0,0,0.20);
+      pointer-events: none;
+    }
   </style>
 </head>
 
 <body>
   <h2>Scan ISBN → Lexile</h2>
-  <p>Tap <b>Start</b>, scan the ISBN barcode (EAN-13) on the back of the book, and Lexile Hub will open.</p>
+  <p>Tap <b>Start</b>, scan the <b>ISBN barcode (EAN-13)</b> on the back of the book (often starts with 978 or 979), and Lexile Hub will open.</p>
 
   <div class="row">
     <button id="start">Start scanning</button>
@@ -26,150 +56,114 @@
   </div>
 
   <p id="status" class="small">Ready.</p>
-  <video id="video" muted playsinline></video>
+
+  <div id="scanner">
+    <div class="aim"></div>
+  </div>
 
   <h3>Can’t scan?</h3>
-  <p class="small">Type the ISBN (13 digits) and open Lexile Hub.</p>
+  <p class="small">Type the ISBN-13 (13 digits) and open Lexile Hub.</p>
   <input id="isbnInput" inputmode="numeric" placeholder="9781234567890" />
   <button id="open">Open Lexile Hub</button>
 
-  <p class="small">
-    Tip: Use the printed ISBN barcode on the book (often starts with 978 or 979). Library sticker barcodes usually won’t work.
-  </p>
-
-  <script type="module">
-    import {
-      BrowserMultiFormatReader,
-      BarcodeFormat,
-      DecodeHintType
-    } from "https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/+esm";
-
+  <script src="https://cdn.jsdelivr.net/npm/quagga@0.12.1/dist/quagga.min.js"></script>
+  <script>
     const statusEl = document.getElementById("status");
-    const videoEl = document.getElementById("video");
     const startBtn = document.getElementById("start");
     const stopBtn = document.getElementById("stop");
+    const scannerEl = document.getElementById("scanner");
     const isbnInput = document.getElementById("isbnInput");
     const openBtn = document.getElementById("open");
 
-    // Android/Chrome stability: avoid requesting a specific camera unless needed.
-    // Decode only EAN-13 for speed and reliability.
-    const hints = new Map();
-    hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.EAN_13]);
-
-    const reader = new BrowserMultiFormatReader(hints);
-
-    let controls = null;
-    let starting = false;
+    let running = false;
 
     const digitsOnly = (t) => (t || "").replace(/\D/g, "");
     const looksLikeIsbn = (s) => s.length === 13 && (s.startsWith("978") || s.startsWith("979"));
 
-    const isAndroid = /Android/i.test(navigator.userAgent);
-
     function openLexile(isbn13) {
-      // Use location.assign for slightly more consistent navigation on some Android builds
       window.location.assign(`https://hub.lexile.com/find-a-book/details/${isbn13}`);
     }
 
-    async function pickBackCameraDeviceId() {
-      const devices = await BrowserMultiFormatReader.listVideoInputDevices();
-      if (!devices || devices.length === 0) return null;
-
-      const preferred = devices.find(d => /back|rear|environment/i.test(d.label));
-      return (preferred || devices[0]).deviceId;
-    }
-
     function stop() {
-      try { controls?.stop(); } catch {}
-      controls = null;
-      starting = false;
-
+      if (!running) return;
+      try { Quagga.stop(); } catch {}
+      running = false;
       startBtn.disabled = false;
       stopBtn.disabled = true;
-
-      // Don't overwrite redirect message
-      if (!statusEl.textContent.includes("Opening Lexile Hub")) {
-        statusEl.textContent = "Stopped.";
-      }
+      statusEl.textContent = "Stopped.";
     }
 
     async function start() {
-      if (starting) return; // prevent double-tap issues
-      starting = true;
+      if (running) return;
 
-      if (!navigator.mediaDevices?.getUserMedia) {
-        statusEl.textContent = "This browser can’t access the camera. Use the ISBN box below.";
-        starting = false;
-        return;
-      }
+      // Clear any previous Quagga DOM
+      // (Quagga sometimes leaves a canvas behind)
+      const canvases = scannerEl.querySelectorAll("canvas");
+      canvases.forEach(c => c.remove());
+      const videos = scannerEl.querySelectorAll("video");
+      videos.forEach(v => v.remove());
 
       startBtn.disabled = true;
       stopBtn.disabled = false;
-      statusEl.textContent = "Requesting camera permission… (If prompted, tap Allow)";
+      statusEl.textContent = "Starting camera… (If prompted, tap Allow)";
 
-      try {
-        // Always stop any prior stream before starting a new one
-        stop();
-
-        // Android stability: prefer letting the browser pick the camera (deviceId = null).
-        // On non-Android devices, we try to pick the back camera (but fall back safely).
-        let deviceId = null;
-        if (!isAndroid) {
-          try { deviceId = await pickBackCameraDeviceId(); } catch { deviceId = null; }
-        }
-
-        statusEl.textContent = "Point the camera at the ISBN barcode…";
-
-        controls = await reader.decodeFromVideoDevice(
-          deviceId,
-          videoEl,
-          (result, err) => {
-            if (!result) return;
-
-            const raw = result.getText();
-            const isbn = digitsOnly(raw);
-
-            if (looksLikeIsbn(isbn)) {
-              statusEl.textContent = `Found ISBN: ${isbn}. Opening Lexile Hub…`;
-
-              // Stop camera cleanly before navigating
-              try { controls?.stop(); } catch {}
-              controls = null;
-
-              // Android extra-stable behavior: navigate, then force a reload when the user comes back
-              // (prevents "camera started but scanning failed" on subsequent scans).
-              if (isAndroid) {
-                // Store a flag so that when user returns, we reinitialize cleanly.
-                sessionStorage.setItem("reloadOnReturn", "1");
-              }
-
-              openLexile(isbn);
-            } else {
-              statusEl.textContent = `Scanned: ${raw} (not an ISBN-13). Try the ISBN barcode on the back cover.`;
-            }
+      // Quagga config tuned for ISBN/EAN-13 on Android
+      Quagga.init({
+        inputStream: {
+          name: "Live",
+          type: "LiveStream",
+          target: scannerEl,
+          constraints: {
+            facingMode: "environment",
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          },
+          area: { // restrict scanning to the “aim” box region (percentages)
+            top: "40%",
+            right: "8%",
+            left: "8%",
+            bottom: "38%"
           }
-        );
+        },
+        locator: {
+          patchSize: "medium",
+          halfSample: true
+        },
+        numOfWorkers: Math.max(1, (navigator.hardwareConcurrency || 2) - 1),
+        frequency: 10,
+        decoder: {
+          readers: ["ean_reader"] // EAN-13
+        },
+        locate: true
+      }, function(err) {
+        if (err) {
+          console.error(err);
+          statusEl.textContent = "Camera/scanner failed to start. Check that camera permission is allowed for this site in Chrome.";
+          startBtn.disabled = false;
+          stopBtn.disabled = true;
+          running = false;
+          return;
+        }
+        Quagga.start();
+        running = true;
+        statusEl.textContent = "Point the barcode inside the white box and hold still…";
+      });
 
-        starting = false;
+      Quagga.offDetected(); // prevent duplicate handlers if Start pressed again
+      Quagga.onDetected(function(result) {
+        const code = result && result.codeResult && result.codeResult.code;
+        const isbn = digitsOnly(code);
 
-      } catch (e) {
-        console.error(e);
-        statusEl.textContent = `Camera/scanner error: ${e?.name || "Unknown"} — ${e?.message || e}`;
-        startBtn.disabled = false;
-        stopBtn.disabled = true;
-        starting = false;
-      }
+        if (looksLikeIsbn(isbn)) {
+          statusEl.textContent = `Found ISBN: ${isbn}. Opening Lexile Hub…`;
+          stop();
+          // Small delay helps Android finish releasing camera before navigation
+          setTimeout(() => openLexile(isbn), 150);
+        } else if (isbn && isbn.length >= 10) {
+          statusEl.textContent = `Scanned: ${isbn} (not an ISBN-13 starting 978/979). Try the printed ISBN barcode on the book.`;
+        }
+      });
     }
-
-    // Android/Chrome stability: when user returns from Lexile (Back button),
-    // the browser may keep the old camera state. Force a clean reload once.
-    window.addEventListener("pageshow", () => {
-      if (sessionStorage.getItem("reloadOnReturn") === "1") {
-        sessionStorage.removeItem("reloadOnReturn");
-        // Small delay helps some Android devices
-        setTimeout(() => window.location.reload(), 150);
-      }
-    });
 
     startBtn.addEventListener("click", start);
     stopBtn.addEventListener("click", stop);
@@ -179,6 +173,9 @@
       if (looksLikeIsbn(isbn)) openLexile(isbn);
       else statusEl.textContent = "Please enter a valid ISBN-13 (13 digits, usually starts 978 or 979).";
     });
+
+    // If user navigates away and comes back, stop cleanly
+    window.addEventListener("pagehide", stop);
   </script>
 </body>
 </html>
