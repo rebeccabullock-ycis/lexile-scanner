@@ -30,8 +30,6 @@
       height: 100%;
       object-fit: cover;
     }
-
-    /* big guide box (visual only) */
     .aim {
       position: absolute;
       left: 6%;
@@ -43,14 +41,6 @@
       box-shadow: 0 0 0 9999px rgba(0,0,0,0.15);
       pointer-events: none;
     }
-
-    .dot {
-      display:inline-block; width:10px; height:10px; border-radius:999px;
-      background:#999; margin-right:8px; vertical-align:middle;
-    }
-    .dot.on { background:#22c55e; }  /* green */
-    .dot.blink { animation: blink 1s infinite; }
-    @keyframes blink { 0%{opacity:.3} 50%{opacity:1} 100%{opacity:.3} }
   </style>
 </head>
 
@@ -63,7 +53,7 @@
     <button id="stop" disabled>Stop</button>
   </div>
 
-  <p id="status" class="small"><span id="dot" class="dot"></span>Ready.</p>
+  <p id="status" class="small">Ready.</p>
 
   <div id="scanner">
     <div class="aim"></div>
@@ -77,7 +67,6 @@
   <script src="https://cdn.jsdelivr.net/npm/quagga@0.12.1/dist/quagga.min.js"></script>
   <script>
     const statusEl = document.getElementById("status");
-    const dotEl = document.getElementById("dot");
     const startBtn = document.getElementById("start");
     const stopBtn = document.getElementById("stop");
     const scannerEl = document.getElementById("scanner");
@@ -85,10 +74,9 @@
     const openBtn = document.getElementById("open");
 
     let running = false;
-    let processedCount = 0;
 
     const digitsOnly = (t) => (t || "").replace(/\D/g, "");
-    const looksLikeIsbn = (s) => s.length === 13; // keep it permissive; we’ll accept any EAN-13 digits
+    const isIsbn13 = (s) => s.length === 13;
 
     function openLexile(isbn13) {
       window.location.assign(`https://hub.lexile.com/find-a-book/details/${isbn13}`);
@@ -97,26 +85,39 @@
     function forceStopCameraTracks() {
       const v = scannerEl.querySelector("video");
       const stream = v && v.srcObject;
-      if (stream && stream.getTracks) {
-        stream.getTracks().forEach(t => { try { t.stop(); } catch {} });
-      }
-      if (v) {
-        try { v.pause(); } catch {}
-        try { v.srcObject = null; } catch {}
-      }
+      if (stream && stream.getTracks) stream.getTracks().forEach(t => { try { t.stop(); } catch {} });
+      if (v) { try { v.pause(); } catch {} try { v.srcObject = null; } catch {} }
     }
 
-    function cleanupScannerDom() {
+    function cleanupDom() {
       scannerEl.querySelectorAll("canvas").forEach(c => c.remove());
       scannerEl.querySelectorAll("video").forEach(v => v.remove());
     }
 
-    function setStatus(text, mode) {
-      // mode: "off" | "on" | "blink"
-      dotEl.className = "dot";
-      if (mode === "on") dotEl.classList.add("on");
-      if (mode === "blink") dotEl.classList.add("on","blink");
-      statusEl.childNodes[1].nodeValue = text ? text : "";
+    async function tryForceContinuousAutofocus() {
+      // Quagga injects a <video> into #scanner
+      const v = scannerEl.querySelector("video");
+      if (!v || !v.srcObject) return;
+
+      const [track] = v.srcObject.getVideoTracks();
+      if (!track) return;
+
+      const caps = track.getCapabilities ? track.getCapabilities() : null;
+
+      // Attempt continuous autofocus if supported
+      try {
+        if (caps && caps.focusMode && caps.focusMode.includes("continuous")) {
+          await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+          statusEl.textContent = "Camera ready. Hold barcode steady in the box…";
+        } else {
+          // Still try (some devices don’t expose capabilities properly)
+          await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+          statusEl.textContent = "Camera ready. Hold barcode steady in the box…";
+        }
+      } catch (e) {
+        // Not fatal — device may not allow programmatic focus control
+        statusEl.textContent = "Camera ready. If it looks blurry, move the book closer/further until it sharpens.";
+      }
     }
 
     function stop() {
@@ -124,23 +125,21 @@
       try { Quagga.offProcessed(); } catch {}
       try { Quagga.stop(); } catch {}
       forceStopCameraTracks();
-      cleanupScannerDom();
+      cleanupDom();
 
       running = false;
       startBtn.disabled = false;
       stopBtn.disabled = true;
-      setStatus("Stopped.", "off");
+      statusEl.textContent = "Stopped.";
     }
 
     function start() {
       if (running) return;
 
-      cleanupScannerDom();
-      processedCount = 0;
-
+      cleanupDom();
       startBtn.disabled = true;
       stopBtn.disabled = false;
-      setStatus("Starting camera… (tap Allow if prompted)", "blink");
+      statusEl.textContent = "Starting camera… (tap Allow if prompted)";
 
       Quagga.init({
         inputStream: {
@@ -152,51 +151,35 @@
             width:  { ideal: 1920 },
             height: { ideal: 1080 }
           }
-          // NOTE: no area restriction (most forgiving)
         },
-        locator: {
-          patchSize: "large",
-          halfSample: false
-        },
-        numOfWorkers: 0,       // more stable on many Android devices
+        locator: { patchSize: "large", halfSample: false },
+        numOfWorkers: 0,
         frequency: 15,
-        decoder: {
-          // Keep EAN-13 first, but include closely related formats to be safe
-          readers: ["ean_reader", "upc_reader", "upc_e_reader", "ean_8_reader"]
-        },
+        decoder: { readers: ["ean_reader", "upc_reader", "upc_e_reader", "ean_8_reader"] },
         locate: true
       }, function(err) {
         if (err) {
           console.error(err);
           startBtn.disabled = false;
           stopBtn.disabled = true;
-          setStatus("Could not start scanner. In Chrome: lock icon → Permissions → Camera → Allow, then refresh.", "off");
+          statusEl.textContent = "Could not start scanner. In Chrome: lock icon → Permissions → Camera → Allow.";
           running = false;
           return;
         }
 
         Quagga.start();
         running = true;
-        setStatus("Hold the barcode steady (inside the white box) for 2 seconds…", "on");
+        statusEl.textContent = "Camera started. Trying to enable continuous autofocus…";
 
-        Quagga.offProcessed();
-        Quagga.onProcessed(() => { processedCount++; });
-
-        // If we are processing frames but not detecting, give tips automatically
-        setTimeout(() => {
-          if (!running) return;
-          if (processedCount < 10) {
-            setStatus("Camera is on, but frames look unclear. Try brighter light + reduce glare + hold still.", "on");
-          }
-        }, 2000);
+        // Give the video element a moment to appear, then force autofocus
+        setTimeout(tryForceContinuousAutofocus, 500);
 
         Quagga.offDetected();
         Quagga.onDetected((result) => {
           const code = result?.codeResult?.code || "";
           const isbn = digitsOnly(code);
-
-          if (looksLikeIsbn(isbn)) {
-            setStatus(`Found: ${isbn}. Opening Lexile Hub…`, "on");
+          if (isIsbn13(isbn)) {
+            statusEl.textContent = `Found: ${isbn}. Opening Lexile Hub…`;
             stop();
             setTimeout(() => openLexile(isbn), 150);
           }
@@ -209,8 +192,8 @@
 
     openBtn.addEventListener("click", () => {
       const isbn = digitsOnly(isbnInput.value);
-      if (isbn.length === 13) openLexile(isbn);
-      else setStatus("Please enter a valid ISBN-13 (13 digits).", "off");
+      if (isIsbn13(isbn)) openLexile(isbn);
+      else statusEl.textContent = "Please enter a valid ISBN-13 (13 digits).";
     });
 
     window.addEventListener("pagehide", stop);
